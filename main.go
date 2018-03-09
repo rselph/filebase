@@ -16,7 +16,7 @@ import (
 
 const (
 	dbFile = ".filebase.sqlite3"
-	filesPerBatch = 512
+	filesPerBatch = 1024
 )
 
 const schema = `
@@ -49,18 +49,13 @@ var (
 
 func main() {
 	usr, err := user.Current()
-	if err != nil {
-		log.Fatal(err)
-	}
+	fatal(err)
 	defaultDBPath = filepath.Join(usr.HomeDir, dbFile)
 
 	flag.StringVar(&dbPath, "db", defaultDBPath, "Path to database file.")
 	flag.Parse()
 
-	cache, err = newFileDB(dbPath)
-	if err != nil {
-		log.Fatal(err)
-	}
+	cache= newFileDB(dbPath)
 	defer cache.close()
 
 	for _, dir := range flag.Args() {
@@ -72,9 +67,7 @@ func (fdb *fileDB) scanDir(dir string) {
 	fdb.getFiles(dir)
 	fdb.wg.Wait()
 	_, err := fdb.flush.Exec()
-	if err != nil {
-		log.Fatal(err)
-	}
+	fatal(err)
 }
 
 func (fdb *fileDB) getFiles(dir string) {
@@ -104,36 +97,23 @@ func (fdb *fileDB) getFiles(dir string) {
 		var i int
 
 		tx, err := fdb.db.Begin()
-		if err != nil {
-			log.Fatal(err)
-		}
+		fatal(err)
 
 		for info := range infos {
 
-			err = fdb.insertOneSample(tx, info.p, info.i, info.now)
+			fdb.insertOneSample(tx, info.p, info.i, info.now)
 			i++
-			if err == nil {
-				if i % filesPerBatch == 0 {
-					fmt.Print(".")
-					err = tx.Commit()
-					if err != nil {
-						log.Fatal(err)
-					}
-					tx, err = fdb.db.Begin()
-					if err != nil {
-						log.Fatal(err)
-					}
-				}
-			} else {
-				tx.Rollback()
-				log.Fatal(err)
+			if i % filesPerBatch == 0 {
+				fmt.Print(".")
+				err = tx.Commit()
+				fatal(err)
+				tx, err = fdb.db.Begin()
+				fatal(err)
 			}
 		}
 
 		err = tx.Commit()
-		if err != nil {
-			log.Fatal(err)
-		}
+		fatal(err)
 	}()
 
 	filepath.Walk(canonicalPath, func(path string, info os.FileInfo, err error) error {
@@ -150,29 +130,27 @@ func (fdb *fileDB) getFiles(dir string) {
 	})
 }
 
-func (fdb *fileDB) insertOneSample(tx *sql.Tx, path string, info os.FileInfo, now time.Time) (err error) {
+func (fdb *fileDB) insertOneSample(tx *sql.Tx, path string, info os.FileInfo, now time.Time) {
+	var err error
 	var fileid int64
 
 	err = tx.Stmt(fdb.getFileID).QueryRow(path).Scan(&fileid)
 	if err == sql.ErrNoRows {
 		res, err := tx.Stmt(fdb.insertFile).Exec(path)
-		if err != nil {
-			return err
-		}
+		fatal(err)
+
 		fileid, err = res.LastInsertId()
-		if err != nil {
-			return err
-		}
-	} else if err != nil {
-		return
+		fatal(err)
+
 	}
+	fatal(err)
 
 	_, err = tx.Stmt(fdb.insertSample).Exec(fileid, now.Unix(), info.Mode(), info.Size(), info.ModTime().Unix())
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	_, err = tx.Stmt(fdb.markFound).Exec(fileid)
+	fatal(err)
+
 	return
 }
 
@@ -187,44 +165,31 @@ type fileDB struct {
 	flush        *sql.Stmt
 }
 
-func newFileDB(path string) (fdb *fileDB, err error) {
-	fdb = &fileDB{}
+func newFileDB(path string) (fdb *fileDB) {
+	var err error
 
+	fdb = &fileDB{}
 	fdb.db, err = sql.Open("sqlite3", path)
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	_, err = fdb.db.Exec(schema)
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	fdb.getFileID, err = fdb.db.Prepare("SELECT fileid FROM file WHERE path = ?")
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	fdb.insertFile, err = fdb.db.Prepare("INSERT INTO file (path) VALUES (?)")
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	fdb.insertSample, err = fdb.db.Prepare(
 		"INSERT INTO sample (fileid, sampletime, mode, size, mtime) VALUES (?,?,?,?,?)")
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	fdb.markFound, err = fdb.db.Prepare("INSERT INTO found VALUES (?)")
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	fdb.flush, err = fdb.db.Prepare("DELETE FROM file WHERE fileid NOT IN (SELECT fileid FROM found)")
-	if err != nil {
-		return
-	}
+	fatal(err)
 
 	return
 }
@@ -232,4 +197,10 @@ func newFileDB(path string) (fdb *fileDB, err error) {
 func (fdb *fileDB) close() {
 	fdb.wg.Wait()
 	fdb.db.Close()
+}
+
+func fatal(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
 }
