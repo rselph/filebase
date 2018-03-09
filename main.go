@@ -16,6 +16,7 @@ import (
 
 const (
 	dbFile = ".filebase.sqlite3"
+	filesPerBatch = 512
 )
 
 const schema = `
@@ -72,7 +73,7 @@ func (fdb *fileDB) scanDir(dir string) {
 	fdb.wg.Wait()
 	_, err := fdb.flush.Exec()
 	if err != nil {
-		log.Print(err)
+		log.Fatal(err)
 	}
 }
 
@@ -99,21 +100,41 @@ func (fdb *fileDB) getFiles(dir string) {
 	fdb.wg.Add(1)
 	go func() {
 		defer fdb.wg.Done()
+
+		var i int
+
+		tx, err := fdb.db.Begin()
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		for info := range infos {
-			fmt.Println(info)
-			tx, err := fdb.db.Begin()
-			if err != nil {
-				log.Print(err)
-				continue
-			}
+			//fmt.Println(info)
+			fmt.Print(".")
 
 			err = fdb.insertOneSample(tx, info.p, info.i, info.now)
+			i++
 			if err == nil {
-				tx.Commit()
+				if i % filesPerBatch == 0 {
+					fmt.Println()
+					err = tx.Commit()
+					if err != nil {
+						log.Fatal(err)
+					}
+					tx, err = fdb.db.Begin()
+					if err != nil {
+						log.Fatal(err)
+					}
+				}
 			} else {
 				tx.Rollback()
-				log.Print(err)
+				log.Fatal(err)
 			}
+		}
+
+		err = tx.Commit()
+		if err != nil {
+			log.Fatal(err)
 		}
 	}()
 
