@@ -109,14 +109,12 @@ func (fdb *fileDB) getFiles(dir string) {
 		}
 
 		for info := range infos {
-			//fmt.Println(info)
-			fmt.Print(".")
 
 			err = fdb.insertOneSample(tx, info.p, info.i, info.now)
 			i++
 			if err == nil {
 				if i % filesPerBatch == 0 {
-					fmt.Println()
+					fmt.Print(".")
 					err = tx.Commit()
 					if err != nil {
 						log.Fatal(err)
