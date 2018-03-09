@@ -68,6 +68,15 @@ func main() {
 }
 
 func (fdb *fileDB) scanDir(dir string) {
+	fdb.getFiles(dir)
+	fdb.wg.Wait()
+	_, err := fdb.flush.Exec()
+	if err != nil {
+		log.Print(err)
+	}
+}
+
+func (fdb *fileDB) getFiles(dir string) {
 	canonicalPath, err := filepath.Abs(dir)
 	if err != nil {
 		log.Print(err)
@@ -120,7 +129,6 @@ func (fdb *fileDB) scanDir(dir string) {
 
 		return nil
 	})
-
 }
 
 func (fdb *fileDB) insertOneSample(tx *sql.Tx, path string, info os.FileInfo, now time.Time) (err error) {
