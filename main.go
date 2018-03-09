@@ -142,8 +142,9 @@ func (fdb *fileDB) insertOneSample(tx *sql.Tx, path string, info os.FileInfo, no
 		fileid, err = res.LastInsertId()
 		fatal(err)
 
+	} else {
+		fatal(err)
 	}
-	fatal(err)
 
 	_, err = tx.Stmt(fdb.insertSample).Exec(fileid, now.Unix(), info.Mode(), info.Size(), info.ModTime().Unix())
 	fatal(err)
@@ -201,6 +202,7 @@ func (fdb *fileDB) close() {
 
 func fatal(err error) {
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
+		//log.Fatal(err)
 	}
 }
