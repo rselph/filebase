@@ -49,6 +49,19 @@ CREATE TABLE IF NOT EXISTS sample (
 CREATE INDEX IF NOT EXISTS samplesize ON sample(size);
 CREATE INDEX IF NOT EXISTS samplemtime ON sample(mtime);
 
+create view IF NOT EXISTS times as
+    SELECT file.dirid, sample.fileid, sampletime, mode, size, mtime, max(sampletime) as maxtime, min(sampletime) as mintime
+    from sample, file, dir
+    where file.fileid == sample.fileid and file.dirid = dir.dirid
+    group by sample.fileid;
+
+create view IF NOT EXISTS rates AS
+    SELECT *,
+      ((select size from sample WHERE sampletime = maxtime and sample.fileid = times.fileid)-
+       (select size from sample WHERE sampletime = mintime and sample.fileid = times.fileid)) / 
+      cast(maxtime-mintime AS real) as rate
+    from times;
+
 CREATE TEMPORARY TABLE found (fileid integer PRIMARY KEY );
 `
 
@@ -372,11 +385,9 @@ func (fdb *fileDB) getNewest(dirid int64, n int) []fileEnt {
 
 func (fdb *fileDB) getFastest(dirid int64, n int) []fileEnt {
 	rows, err := fdb.db.Query(
-		`SELECT path, sampletime, mode, size, mtime, 
-					cast(max(size) - min(size) as real) / (max(sampletime) - min(sampletime)) as rate 
-				from sample, file
-				where file.fileid == sample.fileid and file.dirid = ?
-				group by sample.fileid order by rate DESC limit ?`, dirid, n)
+		`select path, sampletime, mode, size, mtime, rate
+  				from rates, file
+  				where rates.fileid = file.fileid and file.dirid = ? order by rate DESC limit ?;`, dirid, n)
 	fatal(err)
 	defer rows.Close()
 
