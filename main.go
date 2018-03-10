@@ -407,8 +407,8 @@ func fatal(err error) {
 const suffixes = " kMGTP"
 
 func niceSizef(n float64) string {
-	if n <= 0.0 {
-		return fmt.Sprintf("%f", n)
+	if n == 0.0 {
+		return "0"
 	}
 	p := int(math.Floor(math.Log10(n) / 3.0))
 	if p >= len(suffixes) {
