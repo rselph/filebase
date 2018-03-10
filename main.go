@@ -174,6 +174,7 @@ func (fdb *fileDB) getFiles(dir string) {
 
 	filepath.Walk(canonicalPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			fmt.Println()
 			log.Print(err)
 			return nil
 		}
