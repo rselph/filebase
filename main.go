@@ -107,6 +107,15 @@ func main() {
 		}
 		fmt.Println()
 	}
+
+	if doFastest {
+		fmt.Println("*** FASTEST GROWING FILES ***")
+		newFiles := cache.getFastest(listSize)
+		for _, bigFile := range newFiles {
+			fmt.Println(bigFile.String())
+		}
+		fmt.Println()
+	}
 }
 
 func (fdb *fileDB) scanDir(dir string) {
@@ -244,10 +253,17 @@ type fileEnt struct {
 	mode  int
 	size  int64
 	mtime time.Time
+	rate  float64
 }
 
+const secondsPerDay = 3600 * 24
+
 func (f *fileEnt) String() string {
-	return fmt.Sprintf("%v\t%o\t%v\t%v", f.mtime, f.mode, niceSize(f.size), f.path)
+	rateString := ""
+	if f.rate != 0.0 {
+		rateString = fmt.Sprintf("%vB/day\t", niceSizef(f.rate*secondsPerDay))
+	}
+	return fmt.Sprintf("%v\t%o\t%v\t%s%v", f.mtime, f.mode, niceSize(f.size), rateString, f.path)
 }
 
 func (f *fileEnt) Scan(r *sql.Rows) {
@@ -309,6 +325,29 @@ func (fdb *fileDB) getNewest(n int) []fileEnt {
 	return rowsToResults(rows, n)
 }
 
+func (fdb *fileDB) getFastest(n int) []fileEnt {
+	rows, err := fdb.db.Query(
+		`SELECT path, sampletime, mode, size, mtime, 
+					(max(size) - min(size)) / (max(sampletime) - min(sampletime)) as rate 
+				from sample, file
+				where file.fileid == sample.fileid
+				group by sample.fileid order by rate DESC limit ?`, n)
+	fatal(err)
+	defer rows.Close()
+
+	result := make([]fileEnt, n)
+	i := 0
+	for rows.Next() && i < n {
+		var when, mtime int64
+		rows.Scan(&result[i].path, &when, &result[i].mode, &result[i].size, &mtime, &result[i].rate)
+		result[i].when = time.Unix(when, 0)
+		result[i].mtime = time.Unix(mtime, 0)
+		i++
+	}
+
+	return result[0:i]
+}
+
 func (fdb *fileDB) close() {
 	fdb.wg.Wait()
 	fdb.db.Close()
@@ -322,7 +361,17 @@ func fatal(err error) {
 
 const suffixes = " kMGTP"
 
+func niceSizef(n float64) string {
+	if n <= 0.0 {
+		return fmt.Sprintf("%f", n)
+	}
+	p := int(math.Floor(math.Log10(n) / 3.0))
+	if p >= len(suffixes) {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%3.2f%c", n/math.Pow10(3*p), suffixes[p])
+}
+
 func niceSize(n int64) string {
-	p := int(math.Floor(math.Log10(float64(n)) / 3.0))
-	return fmt.Sprintf("%3.2f%c", float64(n)/math.Pow10(3*p), suffixes[p])
+	return niceSizef(float64(n))
 }
