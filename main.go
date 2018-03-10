@@ -24,11 +24,18 @@ const (
 const schema = `
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE IF NOT EXISTS file (
-        fileid integer primary key,
-        path text
+CREATE TABLE IF NOT EXISTS dir (
+		dirid integer PRIMARY KEY,
+		dirpath text
 );
-CREATE UNIQUE INDEX IF NOT EXISTS filepath ON file(path);
+
+CREATE TABLE IF NOT EXISTS file (
+        fileid integer PRIMARY KEY,
+        dirid integer,
+        path text,
+        FOREIGN KEY (dirid) REFERENCES dir(dirid) ON UPDATE RESTRICT ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS filediridpath ON file(dirid, path);
 
 CREATE TABLE IF NOT EXISTS sample (
         fileid integer,
@@ -36,8 +43,8 @@ CREATE TABLE IF NOT EXISTS sample (
         mode integer,
         size integer,
         mtime integer,
-        primary key (fileid, sampletime),
-        foreign key (fileid) references file(fileid) ON UPDATE RESTRICT ON DELETE CASCADE
+        PRIMARY KEY (fileid, sampletime),
+        FOREIGN KEY (fileid) REFERENCES file(fileid) ON UPDATE RESTRICT ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS samplesize ON sample(size);
 CREATE INDEX IF NOT EXISTS samplemtime ON sample(mtime);
@@ -75,67 +82,97 @@ func main() {
 	cache = newFileDB(dbPath)
 	defer cache.close()
 
-	if !noScan {
-		for _, dir := range flag.Args() {
-			cache.scanDir(dir)
+	for _, dir := range flag.Args() {
+		dirid := cache.getDirID(dir)
+
+		if !noScan {
+			cache.scanDir(dirid)
+		}
+
+		if doBiggest {
+			fmt.Println("*** BIGGEST FILES ***")
+			bigFiles := cache.getBiggest(dirid, listSize)
+			for _, bigFile := range bigFiles {
+				fmt.Println(bigFile.String())
+			}
+			fmt.Println()
+		}
+
+		if doOldest {
+			fmt.Println("*** OLDEST FILES ***")
+			oldFiles := cache.getOldest(dirid, listSize)
+			for _, oldFile := range oldFiles {
+				fmt.Println(oldFile.String())
+			}
+			fmt.Println()
+		}
+
+		if doNewest {
+			fmt.Println("*** NEWEST FILES ***")
+			newFiles := cache.getNewest(dirid, listSize)
+			for _, newFile := range newFiles {
+				fmt.Println(newFile.String())
+			}
+			fmt.Println()
+		}
+
+		if doFastest {
+			fmt.Println("*** FASTEST GROWING FILES ***")
+			newFiles := cache.getFastest(dirid, listSize)
+			for _, fastFile := range newFiles {
+				fmt.Println(fastFile.String())
+			}
+			fmt.Println()
 		}
 	}
 
-	if doBiggest {
-		fmt.Println("*** BIGGEST FILES ***")
-		bigFiles := cache.getBiggest(listSize)
-		for _, bigFile := range bigFiles {
-			fmt.Println(bigFile.String())
-		}
-		fmt.Println()
-	}
-
-	if doOldest {
-		fmt.Println("*** OLDEST FILES ***")
-		oldFiles := cache.getOldest(listSize)
-		for _, bigFile := range oldFiles {
-			fmt.Println(bigFile.String())
-		}
-		fmt.Println()
-	}
-
-	if doNewest {
-		fmt.Println("*** NEWEST FILES ***")
-		newFiles := cache.getNewest(listSize)
-		for _, bigFile := range newFiles {
-			fmt.Println(bigFile.String())
-		}
-		fmt.Println()
-	}
-
-	if doFastest {
-		fmt.Println("*** FASTEST GROWING FILES ***")
-		newFiles := cache.getFastest(listSize)
-		for _, bigFile := range newFiles {
-			fmt.Println(bigFile.String())
-		}
-		fmt.Println()
-	}
 }
 
-func (fdb *fileDB) scanDir(dir string) {
-	fdb.getFiles(dir)
+func (fdb *fileDB) scanDir(dirid int64) {
+	err := fdb.getFiles(dirid)
+	if err != nil {
+		return
+	}
+
 	fdb.wg.Wait()
-	_, err := fdb.db.Exec("DELETE FROM file WHERE fileid NOT IN (SELECT fileid FROM found)")
+	_, err = fdb.db.Exec("DELETE FROM file WHERE dirid = ? AND fileid NOT IN (SELECT fileid FROM found)", dirid)
 	fatal(err)
 }
 
-func (fdb *fileDB) getFiles(dir string) {
+func canonical(dir string) (canonicalPath string) {
 	canonicalPath, err := filepath.Abs(dir)
 	if err != nil {
-		log.Print(err)
-		return
+		log.Fatal(err)
 	}
 	canonicalPath, err = filepath.EvalSymlinks(canonicalPath)
 	if err != nil {
-		log.Print(err)
-		return
+		log.Fatal(err)
 	}
+	return
+}
+
+func (fdb *fileDB) getDirID(dir string) (dirid int64) {
+	canonicalPath := canonical(dir)
+	err := fdb.db.QueryRow("SELECT dirid FROM dir WHERE dirpath = ?", canonicalPath).Scan(&dirid)
+	if err == sql.ErrNoRows {
+		res, err := fdb.db.Exec("INSERT INTO dir (dirpath) VALUES (?)", canonicalPath)
+		fatal(err)
+		dirid, err = res.LastInsertId()
+		fatal(err)
+	} else {
+		fatal(err)
+	}
+	return
+}
+
+func (fdb *fileDB) getDirPath(dirid int64) (canonicalPath string) {
+	err := fdb.db.QueryRow("SELECT dirpath FROM dir WHERE dirid = ?", dirid).Scan(&canonicalPath)
+	fatal(err)
+	return
+}
+
+func (fdb *fileDB) getFiles(dirid int64) (err error) {
+	canonicalPath := fdb.getDirPath(dirid)
 
 	type insertJob struct {
 		now time.Time
@@ -156,7 +193,7 @@ func (fdb *fileDB) getFiles(dir string) {
 
 		for info := range infos {
 
-			fdb.insertOneSample(tx, info.p, info.i, info.now)
+			fdb.insertOneSample(dirid, tx, info.p, info.i, info.now)
 			i++
 			if i%filesPerBatch == 0 {
 				fmt.Print(".")
@@ -185,15 +222,17 @@ func (fdb *fileDB) getFiles(dir string) {
 
 		return nil
 	})
+
+	return
 }
 
-func (fdb *fileDB) insertOneSample(tx *sql.Tx, path string, info os.FileInfo, now time.Time) {
+func (fdb *fileDB) insertOneSample(dirid int64, tx *sql.Tx, path string, info os.FileInfo, now time.Time) {
 	var err error
 	var fileid int64
 
-	err = tx.Stmt(fdb.getFileID).QueryRow(path).Scan(&fileid)
+	err = tx.Stmt(fdb.getFileID).QueryRow(dirid, path).Scan(&fileid)
 	if err == sql.ErrNoRows {
-		res, err := tx.Stmt(fdb.insertFile).Exec(path)
+		res, err := tx.Stmt(fdb.insertFile).Exec(dirid, path)
 		fatal(err)
 
 		fileid, err = res.LastInsertId()
@@ -227,15 +266,17 @@ func newFileDB(path string) (fdb *fileDB) {
 
 	fdb = &fileDB{}
 	fdb.db, err = sql.Open("sqlite3", path)
-	fatal(err)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	_, err = fdb.db.Exec(schema)
 	fatal(err)
 
-	fdb.getFileID, err = fdb.db.Prepare("SELECT fileid FROM file WHERE path = ?")
+	fdb.getFileID, err = fdb.db.Prepare("SELECT fileid FROM file WHERE dirid = ? AND path = ?")
 	fatal(err)
 
-	fdb.insertFile, err = fdb.db.Prepare("INSERT INTO file (path) VALUES (?)")
+	fdb.insertFile, err = fdb.db.Prepare("INSERT INTO file (dirid, path) VALUES (?,?)")
 	fatal(err)
 
 	fdb.insertSample, err = fdb.db.Prepare(
@@ -287,52 +328,55 @@ func rowsToResults(r *sql.Rows, n int) []fileEnt {
 	return result[0:i]
 }
 
-func (fdb *fileDB) getBiggest(n int) []fileEnt {
+func (fdb *fileDB) getBiggest(dirid int64, n int) []fileEnt {
 	rows, err := fdb.db.Query(
 		`select path, sampletime, mode, size, mtime from file, sample 
 		where file.fileid=sample.fileid and 
+			file.dirid = ? and
 			sample.sampletime =	(
 				select max(sampletime) from sample where file.fileid=sample.fileid
 				)
-		order by sample.size DESC LIMIT ?`, n)
+		order by sample.size DESC LIMIT ?`, dirid, n)
 	fatal(err)
 
 	return rowsToResults(rows, n)
 }
 
-func (fdb *fileDB) getOldest(n int) []fileEnt {
+func (fdb *fileDB) getOldest(dirid int64, n int) []fileEnt {
 	rows, err := fdb.db.Query(
 		`select path, sampletime, mode, size, mtime from file, sample 
 		where file.fileid=sample.fileid and 
+			file.dirid = ? and
 			sample.sampletime =	(
 				select max(sampletime) from sample where file.fileid=sample.fileid
 				)
-		order by sample.mtime ASC LIMIT ?`, n)
+		order by sample.mtime ASC LIMIT ?`, dirid, n)
 	fatal(err)
 
 	return rowsToResults(rows, n)
 }
 
-func (fdb *fileDB) getNewest(n int) []fileEnt {
+func (fdb *fileDB) getNewest(dirid int64, n int) []fileEnt {
 	rows, err := fdb.db.Query(
 		`select path, sampletime, mode, size, mtime from file, sample 
 		where file.fileid=sample.fileid and 
+			file.dirid = ? and
 			sample.sampletime =	(
 				select max(sampletime) from sample where file.fileid=sample.fileid
 				)
-		order by sample.mtime DESC LIMIT ?`, n)
+		order by sample.mtime DESC LIMIT ?`, dirid, n)
 	fatal(err)
 
 	return rowsToResults(rows, n)
 }
 
-func (fdb *fileDB) getFastest(n int) []fileEnt {
+func (fdb *fileDB) getFastest(dirid int64, n int) []fileEnt {
 	rows, err := fdb.db.Query(
 		`SELECT path, sampletime, mode, size, mtime, 
 					(max(size) - min(size)) / (max(sampletime) - min(sampletime)) as rate 
 				from sample, file
-				where file.fileid == sample.fileid
-				group by sample.fileid order by rate DESC limit ?`, n)
+				where file.fileid == sample.fileid and file.dirid = ?
+				group by sample.fileid order by rate DESC limit ?`, dirid, n)
 	fatal(err)
 	defer rows.Close()
 
