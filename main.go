@@ -373,7 +373,7 @@ func (fdb *fileDB) getNewest(dirid int64, n int) []fileEnt {
 func (fdb *fileDB) getFastest(dirid int64, n int) []fileEnt {
 	rows, err := fdb.db.Query(
 		`SELECT path, sampletime, mode, size, mtime, 
-					(max(size) - min(size)) / (max(sampletime) - min(sampletime)) as rate 
+					cast(max(size) - min(size) as real) / (max(sampletime) - min(sampletime)) as rate 
 				from sample, file
 				where file.fileid == sample.fileid and file.dirid = ?
 				group by sample.fileid order by rate DESC limit ?`, dirid, n)
